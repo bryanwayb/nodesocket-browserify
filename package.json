@@ -1,0 +1,9 @@
+{
+  "scripts": {
+	"build": "browserify common.js client.js -o ./bin/nodesocket.js"
+  },
+  "dependencies": {
+    "buffer": "^3.2.2"
+  },
+  "private": true
+}
