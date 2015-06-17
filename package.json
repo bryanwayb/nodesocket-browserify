@@ -1,9 +1,20 @@
 {
+  "name": "nodesocket-browserify",
+  "version": "0.0.1",
+  "description": "Communication libray for the NodeSocket protocol for use in web clients",
+  "main": "./lib/nodesocket.js",
   "scripts": {
-	"build": "browserify common.js client.js -o ./bin/nodesocket.js"
+    "build": "browserify ./lib/nodesocket.js > ./bin/nodesocket.js && npm run minify",
+    "minify": "uglifyjs ./bin/nodesocket.js -c -m --source-map ./bin/nodesocket.min.map -o ./bin/nodesocket.min.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://bryanwayb@bitbucket.org/bryanwayb/nodesocket-javascript.git"
   },
   "dependencies": {
+    "nodesocket": "0.0.1",
     "buffer": "^3.2.2"
   },
-  "private": true
+  "author": "Bryan Way",
+  "license": "MIT"
 }

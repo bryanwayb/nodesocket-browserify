@@ -1,0 +1,25 @@
+<html>
+	<head>
+		<script src="nodesocket.js" type="text/javascript"></script>
+	</head>
+	<body>
+		<script type="text/javascript">
+			var client = new NodeSocketClient(8080, 'localhost');
+			
+			client.ondata = function(socket, buffer) {
+				console.log(buffer);
+			};
+			
+			client.connect();
+			
+			client.on('verified', function() {
+				console.log('Verified');
+				var example = client.linkFunction('example');
+				
+				example(function(res) {
+					console.log('Returned!!! WOOT!! ' + res);
+				}, 'passed from the client');
+			});
+		</script>
+	</body>
+</html>
