@@ -12,7 +12,7 @@
     "url": "https://bryanwayb@bitbucket.org/bryanwayb/nodesocket-javascript.git"
   },
   "dependencies": {
-    "nodesocket": "0.0.1",
+    "nodesocket": "0.1.1",
     "buffer": "^3.2.2"
   },
   "author": "Bryan Way",
