@@ -32,7 +32,7 @@ NodeSocketClient.prototype._nodeConnected = function(socket) {
 };
 
 NodeSocketClient.prototype.connect = function() {
-	var socket = new WebSocket('ws://' + this._ipaddress + ':' + this._port, 'nodesocket');
+	var socket = new WebSocket('ws' + (this._options.secure ? 's' : '') + '://' + this._ipaddress + ':' + this._port, 'nodesocket');
 	
 	var self = this;
 	socket.onopen = function() {
@@ -54,7 +54,17 @@ NodeSocketClient.prototype.close = function() {
 	return true;
 };
 
-global.NodeSocketClient = module.exports = NodeSocketClient;
+function NodeSocket(options) {
+	this._options = options || { };
+}
+
+NodeSocket.prototype.createClient = function(port, ipaddress) {
+	return new NodeSocketClient(port, ipaddress, this._options);
+};
+
+global.nodesocket = module.exports = function(options) {
+	return new NodeSocket(options);
+};
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
 },{"../node_modules/nodesocket/lib/client.js":2,"../node_modules/nodesocket/lib/common.js":3,"buffer":5,"util":13}],2:[function(require,module,exports){
 (function (Buffer){

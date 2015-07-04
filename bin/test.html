@@ -4,7 +4,7 @@
 	</head>
 	<body>
 		<script type="text/javascript">
-			var client = new NodeSocketClient(8080, 'localhost');
+			var client = nodesocket().createClient(8080, 'localhost');
 			
 			client.ondata = function(socket, buffer) {
 				console.log(buffer);
