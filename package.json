@@ -1,6 +1,6 @@
 {
   "name": "nodesocket-browserify",
-  "version": "0.0.1",
+  "version": "0.1.2",
   "description": "Communication libray for the NodeSocket protocol for use in web clients",
   "main": "./lib/nodesocket.js",
   "scripts": {
@@ -12,8 +12,8 @@
     "url": "https://bryanwayb@bitbucket.org/bryanwayb/nodesocket-javascript.git"
   },
   "dependencies": {
-    "nodesocket": "0.1.1",
-    "buffer": "^3.2.2"
+    "buffer": "^3.2.2",
+    "nodesocket": "^0.1.2"
   },
   "author": "Bryan Way",
   "license": "MIT"
