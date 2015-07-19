@@ -1,7 +1,7 @@
 {
   "name": "nodesocket-browserify",
-  "version": "0.1.2",
-  "description": "Communication libray for the NodeSocket protocol for use in web clients",
+  "version": "0.1.3",
+  "description": "Network protocol for shared execution spaces using WebSockets",
   "main": "./lib/nodesocket.js",
   "scripts": {
     "build": "browserify ./lib/nodesocket.js > ./bin/nodesocket.js && npm run minify",
@@ -9,12 +9,23 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://bryanwayb@bitbucket.org/bryanwayb/nodesocket-javascript.git"
+    "url": "https://github.com/bryanwayb/nodesocket-browserify.git"
   },
   "dependencies": {
     "buffer": "^3.2.2",
     "nodesocket": "^0.1.2"
   },
-  "author": "Bryan Way",
+  "keywords": [
+    "nodesocket",
+    "network",
+    "protocol",
+	"rpc"
+  ],
+  "contributors": [
+    {
+      "name": "Bryan Way",
+      "email": "bryanwayb@gmail.com"
+    }
+  ],
   "license": "MIT"
 }
