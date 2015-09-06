@@ -1,6 +1,901 @@
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+(function (global,Buffer){
+var NodeSocketClient = require('../node_modules/nodesocket/lib/client.js'),
+	NodeSocketCommon = require('../node_modules/nodesocket/lib/common.js'),
+	util = require('util');
 
-},{}],2:[function(require,module,exports){
+NodeSocketClient.prototype._write = function(buffer) {
+	this._socket.send(buffer);
+};
+
+NodeSocketClient.prototype._nodeServerVerified = function() { };
+
+NodeSocketClient.prototype._nodeConnected = function(socket) {
+	this._state = NodeSocketCommon.EnumConnectionState.Connected;
+	this.emit('connect', socket);
+	
+	var self = this;
+	
+	socket.onmessage = function(event) {
+		self._nodeDataReceived.call(self, new Buffer(event.data));
+	};
+	
+	socket.onclose = function(event) {
+		self._nodeClosed.call(self, socket, !event.wasClean);
+	};
+	
+	socket.onerror = function(event) {
+		self._nodeSocketError.call(self, socket, event);
+	};
+	
+	this._write(NodeSocketCommon.nodesocketSignature);
+};
+
+NodeSocketClient.prototype.connect = function() {
+	var socket = new WebSocket('ws' + (this._options.secure ? 's' : '') + '://' + this._ipaddress + ':' + this._port, 'nodesocket');
+	
+	var self = this;
+	socket.onopen = function() {
+		self._nodeConnected.call(self, socket);
+	};
+	
+	this._socket = socket;
+};
+
+NodeSocketClient.prototype.close = function() {
+	if(this._socket) {
+		this._socket.close();
+	}
+	else {
+		this.emit('error', new Error('Unable to stop client, no client instance available'));
+		return false;
+	}
+	
+	return true;
+};
+
+function NodeSocket(options) {
+	this._options = options || { };
+}
+
+NodeSocket.prototype.createClient = function(port, ipaddress) {
+	return new NodeSocketClient(port, ipaddress, this._options);
+};
+
+global.nodesocket = module.exports = function(options) {
+	return new NodeSocket(options);
+};
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
+},{"../node_modules/nodesocket/lib/client.js":2,"../node_modules/nodesocket/lib/common.js":3,"buffer":5,"util":13}],2:[function(require,module,exports){
+(function (Buffer){
+var net = require('net'),
+	tls = require('tls'),
+	NodeSocketCommon = require('./common.js'),
+	EventEmitter = require('events'),
+	util = require('util');
+
+function NodeSocketClient(port, ipaddress, options) {
+	EventEmitter.call(this);
+	
+	this._options = options || { };
+	this._port = port;
+	this._ipaddress = ipaddress;
+	this._socket = undefined;
+	this._functions = { };
+	this._state = NodeSocketCommon.EnumConnectionState.Disconnected;
+	this._master = false;
+	
+	this._secure = this._options.secure;
+	this._interface = this._secure ? tls : net;
+	
+	this._processCallback = undefined;
+	this._processQueue = [];
+}
+util.inherits(NodeSocketClient, EventEmitter);
+
+NodeSocketClient.prototype._write = function(buffer) {
+	if(this._state !== NodeSocketCommon.EnumConnectionState.Disconnected) {
+		if(this._options.webSocket) {
+			this._socket.write(NodeSocketCommon.makeWebSocketFrame(NodeSocketCommon.makeWebSocketFrameObject(buffer)));
+		}
+		else {
+			this._socket.write(buffer);
+		}
+	}
+};
+
+NodeSocketClient.prototype.remoteExecute = function(identifier, typemap, args, callback) {
+	if(this._options.bidirectional) {
+		this.requestMaster();
+	}
+	
+	if(this._master) {
+		if(this._state === NodeSocketCommon.EnumConnectionState.Verified) {
+			var self = this;
+			var buffer = NodeSocketCommon.createExecutePayload(identifier, typemap, args, function(error) {
+				self.emit('error', error, self._socket);
+			});
+			
+			if(!buffer) {
+				return false;
+			}
+			this._processCallback = callback;
+			this._state = NodeSocketCommon.EnumConnectionState.Processing;
+			
+			this._write(buffer);
+		}
+		else if(this._state === NodeSocketCommon.EnumConnectionState.Processing || this._state === NodeSocketCommon.EnumConnectionState.PostProcessing) {
+			this._processQueue.push(new NodeSocketCommon.ProcessQueue(this, this.remoteExecute, arguments));
+		}
+		else {
+			this.emit('error', new Error('Unable to execute remote function on an unverified/disconnected node'), this._socket);
+			return false;
+		}
+	}
+	else {
+		this.emit('error', new Error('Unable to execute remote function when acting as a slave'), this._socket);
+		return false;
+	}
+	
+	return true;
+};
+
+NodeSocketClient.prototype.defineFunction = function(identifier, callback, responseType) {
+	this._functions[identifier] = NodeSocketCommon.makePayloadFunctionStore(callback, responseType);
+};
+
+NodeSocketClient.prototype.linkFunction = function(identifier, typemap) {
+	var self = this;
+	return function(callback) {
+		if(!typemap) {
+			typemap = { };
+		}
+		
+		return self.remoteExecute.call(self, identifier, typemap, Array.prototype.slice.call(arguments, 1), callback);
+	};
+};
+
+NodeSocketClient.prototype.requestMaster = function() {
+	if(!this._master) {
+		if(this._state === NodeSocketCommon.EnumConnectionState.Verified) {
+			this._write(new Buffer([ NodeSocketCommon.EnumExecutionCode.RequestMaster ]));
+			this._master = true;
+			
+			this.emit('master', this._socket);
+		}
+		else {
+			this.emit('error', new Error('A master request must be done over an idle connection'), this._socket);
+			return false;
+		}
+	}
+	
+	return true;
+};
+
+NodeSocketClient.prototype.requestSlave = function() {
+	if(this._master) {
+		if(!this._options.denyMasterRequests) {
+			if(this._state === NodeSocketCommon.EnumConnectionState.Verified || this._state === NodeSocketCommon.EnumConnectionState.PostProcessing) {
+				this._write(new Buffer([ NodeSocketCommon.EnumExecutionCode.RequestSlave ]));
+			}
+			else {
+				this.emit('error', new Error('A slave request must be done over an idle connection'), this._socket);
+				return false;
+			}
+		}
+		else {
+			self.emit('error', new Error('Unable to request as a slave when the current connection denies a remote master'), this._socket);
+			return false;
+		}
+	}
+	
+	return true;
+};
+
+NodeSocketClient.prototype._nodeServerVerified = function() {
+	// Perform any socket configuration
+	this._socket.setKeepAlive(this._options.keepAlive, this._options.keepAliveDelay);
+};
+
+NodeSocketClient.prototype._nodeDataReceived = function(buffer) {
+	this.emit('data', this._socket, buffer);
+	
+	var bufferPosition = buffer.length; // Prevent infinite loops
+
+	if(this._state === NodeSocketCommon.EnumConnectionState.Connected) {
+		if(NodeSocketCommon.nodesocketSignature.equals(buffer)) {
+			this._state = NodeSocketCommon.EnumConnectionState.Verified;
+			bufferPosition = NodeSocketCommon.nodesocketSignature.length;
+			
+			this._nodeServerVerified();
+			this.requestMaster();
+			
+			this.emit('verified', this._socket);
+		}
+	}
+	else if(this._state === NodeSocketCommon.EnumConnectionState.Verified) {
+		var execCode = buffer.readUInt8(0);
+		
+		if(this._master) {
+			if(execCode === NodeSocketCommon.EnumExecutionCode.RequestMaster) {
+				bufferPosition = 1;
+				this._master = this._options.denyMasterRequests;
+				
+				if(!this._master) {
+					this.emit('slave', this._socket);
+				}
+			}
+			else if(execCode === NodeSocketCommon.EnumExecutionCode.RequestSlave) {
+				bufferPosition = 1;
+			}
+			else {
+				this._write(new Buffer([ NodeSocketCommon.EnumNodeResponse.NotAllowed ]));
+			}
+		}
+		else {
+			if(execCode === NodeSocketCommon.EnumExecutionCode.ExecFunction) {
+				var self = this;
+				
+				var writeBuffer = NodeSocketCommon.parseExecutePayload.call(this, this._functions, buffer.slice(1), function(error) {
+					self.emit('error', error, this._socket);
+				});
+				
+				bufferPosition = 1 + writeBuffer.position;
+				
+				this._write(writeBuffer.value);
+			}
+			else if(execCode === NodeSocketCommon.EnumExecutionCode.RequestSlave) {
+				this.requestMaster();
+				bufferPosition = 1;
+			}
+			else if(execCode === NodeSocketCommon.EnumExecutionCode.RequestMaster) {
+				bufferPosition = 1;
+			}
+			else {
+				this._write(new Buffer([ NodeSocketCommon.EnumNodeResponse.InvalidExecCode ]));
+			}
+		}
+	}
+	else if(this._state === NodeSocketCommon.EnumConnectionState.Processing) {
+		this._state = NodeSocketCommon.EnumConnectionState.PostProcessing;
+		
+		var nodeResponse = buffer.readUInt8(0);
+
+		if(nodeResponse === NodeSocketCommon.EnumNodeResponse.Okay) { // No error reported by node
+			var resultBuffer = NodeSocketCommon.parseResultPayload.call(this, buffer.slice(1));
+			bufferPosition = 1 + resultBuffer.position;
+			this._processCallback(resultBuffer.value);
+		}
+		else if(nodeResponse === NodeSocketCommon.EnumNodeResponse.NoResult) {
+			bufferPosition = 1;
+			
+			if(this._processCallback) {
+				this._processCallback();
+			}
+		}
+		else if(nodeResponse in NodeSocketCommon.EnumNodeResponseErrorString) {
+			this.emit('error', new Error(NodeSocketCommon.EnumNodeResponseErrorString[nodeResponse]), this._socket);
+		}
+		else {
+			this.emit('error', new Error('Unknown response received from the connected node'), this._socket);
+		}
+		
+		this._processCallback = undefined;
+		
+		this._state = NodeSocketCommon.EnumConnectionState.Verified;
+		
+		if(this._processQueue.length > 0) {
+			this._processQueue.splice(0, 1)[0].execute();
+		}
+	}
+	
+	if(bufferPosition < buffer.length) {
+		this._nodeDataReceived(buffer.slice(bufferPosition));
+	}
+	
+	return bufferPosition; // This is for the NodeSocketServer class
+};
+
+NodeSocketClient.prototype._nodeSocketError = function(socket, error) {
+	this.emit('error', error, socket);
+};
+
+NodeSocketClient.prototype._nodeDisconnected = function(socket) {
+	this._state = NodeSocketCommon.EnumConnectionState.Disconnected;
+	this.emit('disconnect', socket);
+};
+
+NodeSocketClient.prototype._nodeTimeout = function(socket) {
+	this.emit('timeout', socket);
+	socket.end();
+};
+
+NodeSocketClient.prototype._nodeClosed = function(socket, had_error) {
+	this.emit('close', socket, had_error);
+};
+
+NodeSocketClient.prototype._nodeOCSPResponse = function(socket, response) {
+	this.emit('OCSPResponse', socket, response);
+};
+
+NodeSocketClient.prototype._nodeConnected = function(socket) {
+	this._state = NodeSocketCommon.EnumConnectionState.Connected;
+	this.emit('connect', socket);
+	
+	var self = this;
+	socket.on('data', function(buffer) {
+		self._nodeDataReceived.call(self, buffer);
+	});
+
+	socket.on('end', function() {
+		self._nodeDisconnected.call(self, socket);
+	});
+	
+	socket.on('timeout', function() {
+		self._nodeTimeout.call(self, socket);
+	});
+	
+	socket.on('close', function(had_error) {
+		self._nodeClosed.call(self, socket, had_error);
+	});
+	
+	if(this._secure) {
+		socket.on('OCSPResponse', function(response) {
+			self._nodeOCSPResponse.call(self, socket, response);
+		});
+	}
+	
+	this._write(NodeSocketCommon.nodesocketSignature);
+};
+
+NodeSocketClient.prototype.connect = function() {
+	var args = [ this._port, this._ipaddress];
+	
+	if(this._secure) {
+		args.push(this._options);
+	}
+	
+	var self = this;
+	args.push(function() {
+		self._nodeConnected.call(self, self._socket);
+	});
+	
+	this._socket = this._interface.connect.apply(this, args);
+
+	this._socket.on('error', function(error) {
+		self._nodeSocketError.call(self, self._socket, error);
+	});
+};
+
+NodeSocketClient.prototype.close = function() {
+	if(this._socket) {
+		this._socket.end();
+		this._state = NodeSocketCommon.EnumConnectionState.Disconnected;
+	}
+	else {
+		this.emit('error', new Error('Unable to stop client, no client instance available'));
+		return false;
+	}
+	
+	return true;
+};
+
+module.exports = NodeSocketClient;
+}).call(this,require("buffer").Buffer)
+},{"./common.js":3,"buffer":5,"events":9,"net":4,"tls":4,"util":13}],3:[function(require,module,exports){
+(function (Buffer){
+
+function ProcessQueue(thisArg, method, args) { // Used to store function calls and their arguments to execute at a later time
+	this._thisArg = thisArg;
+	this._method = method;
+	this._args = args;
+}
+
+ProcessQueue.prototype.execute = function() {
+	this._method.apply(this._thisArg, this._args);
+};
+
+function makeBufferPosResponse(value, position) {
+	return {
+		value: value,
+		position: position
+	};
+}
+
+module.exports = {
+	nodesocketSignature: new Buffer('nsockv01', module.exports.encoding),
+	encoding: 'utf-8',
+	
+	EnumConnectionState: {
+		Disconnected:		0x0,
+		Connected:			0x1,
+		Verified:			0x2,
+		Processing:			0x3,
+		WebSocketConnected:	0x4,
+		PostProcessing:		0x5,
+		_max:				0x6
+	},
+	EnumExecutionCode: {
+		RequestMaster:	0x0,
+		RequestSlave:	0x1,
+		ExecFunction:	0x2,
+		_max: 			0x3
+	},
+	EnumDataType: {
+		'byte':			0x0,
+		'ubyte':		0x1,
+		'short':		0x2,
+		'ushort':		0x3,
+		'int':			0x4,
+		'uint':			0x5,
+		'float':		0x6,
+		'double':		0x7,
+		'string':		0x8,
+		'boolean':		0x9,
+		'undefined':	0xA,
+		'null':			0xB,
+		_max: 			0xC
+	},
+	EnumNodeResponse: {
+		Okay:				0x0,
+		NoResult:			0x1, // Still 'ok', just don't read the result stream, there's nothing there
+		InvalidFunction:	0x2,
+		NodeError:			0x3,
+		InvalidExecCode:	0x4,
+		NotAllowed:			0x5,
+		_max: 				0x6
+	},
+	EnumNodeResponseErrorString: {
+		0x0: 'Okay',
+		0x1: 'Okay (No result)',
+		0x2: 'An invalid function was specified',
+		0x3: 'Node reported an internal error',
+		0x4: 'An invalid execution code was specified',
+		0x5: 'Remote functions are not allowed from this node, remote is the current master',
+	},
+	
+	ProcessQueue: ProcessQueue,
+	
+	makePayloadFunctionStore: function(callback, responseType) {
+		return {
+			callback: callback,
+			responseType: responseType
+		};
+	},
+	
+	// Function to process and execute a payload buffer and return the response buffer
+	parseExecutePayload: function(functions, payload, error) {
+		var payloadLength = payload.readUInt32LE(0);
+		var identifierEndPosition = 8 + payload.readUInt32LE(4);
+		var identifier = payload.slice(8, identifierEndPosition).toString(module.exports.encoding);
+		
+		var position = identifierEndPosition;
+		
+		var response = [ new Buffer(1) /* Status code response */ ];
+		if(identifier in functions) {
+			var args = [];
+			for(; position < payloadLength;) {
+				var dataType = payload.readUInt8(position++);
+				var dataSize = payload.readUInt32LE(position);
+				position += 4;
+				var value = undefined;
+				switch(dataType) {
+					case module.exports.EnumDataType.byte:
+						value = payload.readInt8(position);
+						position++;
+						break;
+					case module.exports.EnumDataType.ubyte:
+						value = payload.readUInt8(position);
+						position++;
+						break;
+					case module.exports.EnumDataType.short:
+						value = payload.readInt16LE(position);
+						position += 2;
+						break;
+					case module.exports.EnumDataType.ushort:
+						value = payload.readUInt16LE(position);
+						position += 2;
+						break;
+					case module.exports.EnumDataType.int:
+						value = payload.readInt32LE(position);
+						position += 4;
+						break;
+					case module.exports.EnumDataType.uint:
+						value = payload.readUInt32LE(position);
+						position += 4;
+						break;
+					case module.exports.EnumDataType.float:
+						value = payload.readFloatLE(position);
+						position += 4;
+						break;
+					case module.exports.EnumDataType.double:
+						value = payload.readDoubleLE(position);
+						position += 8;
+						break;
+					case module.exports.EnumDataType.string:
+						var next = position + dataSize;
+						value = payload.slice(position, next).toString(module.exports.encoding);
+						position = next;
+						break;
+					case module.exports.EnumDataType.boolean:
+						value = payload.readUInt8(position) > 0;
+						position++;
+						break;
+					case module.exports.EnumDataType.undefined:
+						value = undefined;
+						break;
+					case module.exports.EnumDataType.null:
+						value = null;
+						break;
+					default:
+						error(new Error('Unsupported data type argument received from client'));
+						response[0].writeUInt8(module.exports.EnumNodeResponse.NodeError, 0);
+						return response[0]; // Early exit
+				}
+				
+				args.push(value);
+			}
+	
+			var result = functions[identifier].callback.apply(this, args);
+			if(result === undefined) {
+				// TODO: Will be removed in future versions. This response type is now handled
+				// in the "Okay" response as the "undefined" datatype.
+				response[0].writeUInt8(module.exports.EnumNodeResponse.NoResult, 0);
+			}
+			else {
+				response[0].writeUInt8(module.exports.EnumNodeResponse.Okay, 0);
+				
+				var argtype = functions[identifier].responseType;
+				
+				if(!argtype) {
+					if(result === null) {
+						argtype = 'null';
+					}
+					else {
+						switch(typeof result) {
+							case 'number':
+								if(result === (result|0)) {
+									argtype = 'int'; // Default to int for normal numbers
+								}
+								else {
+									argtype = 'float'; // float for anything else
+								}
+								break;
+							case 'string':
+								argtype = 'string';
+								break;
+							case 'boolean':
+								argtype = 'boolean';
+								break;
+							case 'undefined':
+								argtype = 'undefiend';
+								break;
+						}
+					}
+					functions[identifier].responseType = argtype;
+				}
+				
+				var tempBuf = undefined;
+				var dataType = module.exports.EnumDataType[argtype];
+				if(dataType !== undefined) {
+					switch(dataType) {
+						case module.exports.EnumDataType.byte:
+							tempBuf = new Buffer(1);
+							tempBuf.writeInt8(result, 0);
+							break;
+						case module.exports.EnumDataType.ubyte:
+							tempBuf = new Buffer(1);
+							tempBuf.writeUInt8(result, 0);
+							break;
+						case module.exports.EnumDataType.short:
+							tempBuf = new Buffer(2);
+							tempBuf.writeInt16LE(result, 0);
+							break;
+						case module.exports.EnumDataType.ushort:
+							tempBuf = new Buffer(2);
+							tempBuf.writeUInt16LE(result, 0);
+							break;
+						case module.exports.EnumDataType.int:
+							tempBuf = new Buffer(4);
+							tempBuf.writeInt32LE(result, 0);
+							break;
+						case module.exports.EnumDataType.uint:
+							tempBuf = new Buffer(4);
+							tempBuf.writeUInt32LE(result, 0);
+							break;
+						case module.exports.EnumDataType.float:
+							tempBuf = new Buffer(4);
+							tempBuf.writeFloatLE(result, 0);
+							break;
+						case module.exports.EnumDataType.double:
+							tempBuf = new Buffer(8);
+							tempBuf.writeDoubleLE(result, 0);
+							break;
+						case module.exports.EnumDataType.string:
+							tempBuf = new Buffer(result);
+							break;
+						case module.exports.EnumDataType.boolean:
+							tempBuf = new Buffer(1);
+							tempBuf.writeUInt8(result ? 0x1 : 0x0, 0);
+							break;
+						case module.exports.EnumDataType.undefined:
+						case module.exports.EnumDataType.null:
+							tempBuf = new Buffer(0);
+							break;
+						default:
+							error(new Error('Data type' + dataType + ' has gone unhandled by this node implementation'));
+							response[0].writeUInt8(module.exports.EnumNodeResponse.NodeError, 0);
+							break;
+					}
+					
+					if(dataType < module.exports.EnumDataType._max) {
+						var argHeader = new Buffer(5);
+						argHeader.writeUInt8(dataType, 0);
+						argHeader.writeUInt32LE(tempBuf.length, 1);
+						response.push(argHeader);
+						response.push(tempBuf);
+					}
+				}
+				else {
+					error(new Error('Unsupported data type returned from nodesocket function'));
+					response[0].writeUInt8(module.exports.EnumNodeResponse.NodeError, 0);
+				}
+			}
+		}
+		else {
+			response[0].writeUInt8(module.exports.EnumNodeResponse.InvalidFunction, 0);
+		}
+	
+		return makeBufferPosResponse(Buffer.concat(response), position);
+	},
+	
+	parseResultPayload: function(buffer) {
+		var dataType = buffer.readUInt8(0);
+		var dataSize = buffer.readUInt32LE(1);
+		var result = undefined;
+		
+		switch(dataType) {
+			case module.exports.EnumDataType.byte:
+				result = buffer.readInt8(5);
+				break;
+			case module.exports.EnumDataType.ubyte:
+				result = buffer.readUInt8(5);
+				break;
+			case module.exports.EnumDataType.short:
+				result = buffer.readInt16LE(5);
+				break;
+			case module.exports.EnumDataType.ushort:
+				result = buffer.readUInt16LE(5);
+				break;
+			case module.exports.EnumDataType.int:
+				result = buffer.readInt32LE(5);
+				break;
+			case module.exports.EnumDataType.uint:
+				result = buffer.readUInt32LE(5);
+				break;
+			case module.exports.EnumDataType.float:
+				result = buffer.readFloatLE(5);
+				break;
+			case module.exports.EnumDataType.double:
+				result = buffer.readDoubleLE(5);
+				break;
+			case module.exports.EnumDataType.string:
+				result = buffer.slice(5, dataSize + 5).toString(module.exports.encoding);
+				break;
+			case module.exports.EnumDataType.boolean:
+				result = buffer.readUInt8(1) > 0;
+				break;
+			case module.exports.EnumDataType.undefined:
+				result = undefined;
+				break;
+			case module.exports.EnumDataType.null:
+				result = null;
+				break;
+			default:
+				this.emit('error', new Error('Unrecognized data type ' + dataType + ' returned from node'), this._socket);
+				return; // Stop processing here
+		}
+		
+		return makeBufferPosResponse(result, 5 + dataSize);
+	},
+	
+	// Creates a remote function payload and sends it
+	createExecutePayload: function(identifier, typemap, args, error) {
+		var bufArray = [ new Buffer([ module.exports.EnumExecutionCode.ExecFunction ]) ];
+		bufArray.push(new Buffer(4)); // [1] = reserverd for total payload size, minus the execution code
+		
+		var buf = new Buffer(4);
+		buf.writeUInt32LE(identifier.length);
+		bufArray.push(buf);
+		
+		var tempBuf = new Buffer(identifier);
+		bufArray.push(tempBuf);
+		
+		var payloadLength = 4 + identifier.length;
+		for(var i = 0; i < args.length; i++) {
+			var iStr = i.toString();
+			var argtype = typemap[iStr];
+			
+			if(!argtype) {
+				if(args[i] === null) {
+					argtype = 'null';
+				}
+				else {
+					switch(typeof args[i]) {
+						case 'number':
+							if(args[i] === (args[i]|0)) {
+								argtype = 'int'; // Default to int for normal numbers
+							}
+							else {
+								argtype = 'float'; // float for anything else
+							}
+							break;
+						case 'string':
+							argtype = 'string';
+							break;
+						case 'boolean':
+							argtype = 'boolean';
+							break;
+						case 'undefined':
+							argtype = 'undefined';
+							break;
+					}
+				}
+				typemap[iStr] = argtype;
+			}
+			
+			var dataType = module.exports.EnumDataType[argtype];
+			if(dataType !== undefined) {
+				switch(dataType) {
+					case module.exports.EnumDataType.byte:
+						tempBuf = new Buffer(1);
+						tempBuf.writeInt8(args[i], 0);
+						break;
+					case module.exports.EnumDataType.ubyte:
+						tempBuf = new Buffer(1);
+						tempBuf.writeUInt8(args[i], 0);
+						break;
+					case module.exports.EnumDataType.short:
+						tempBuf = new Buffer(2);
+						tempBuf.writeInt16LE(args[i], 0);
+						break;
+					case module.exports.EnumDataType.ushort:
+						tempBuf = new Buffer(2);
+						tempBuf.writeUInt16LE(args[i], 0);
+						break;
+					case module.exports.EnumDataType.int:
+						tempBuf = new Buffer(4);
+						tempBuf.writeInt32LE(args[i], 0);
+						break;
+					case module.exports.EnumDataType.uint:
+						tempBuf = new Buffer(4);
+						tempBuf.writeUInt32LE(args[i], 0);
+						break;
+					case module.exports.EnumDataType.float:
+						tempBuf = new Buffer(4);
+						tempBuf.writeFloatLE(args[i], 0);
+						break;
+					case module.exports.EnumDataType.double:
+						tempBuf = new Buffer(8);
+						tempBuf.writeDoubleLE(args[i], 0);
+						break;
+					case module.exports.EnumDataType.string:
+						tempBuf = new Buffer(args[i]);
+						break;
+					case module.exports.EnumDataType.boolean:
+						tempBuf = new Buffer(1);
+						tempBuf.writeUInt8(args[i] ? 0x1 : 0x0, 0);
+						break;
+					case module.exports.EnumDataType.undefined:
+					case module.exports.EnumDataType.null:
+						tempBuf = new Buffer(0);
+						break;
+					default:
+						error(new Error('Data type ' + dataType + ' has gone unhandled by client'));
+						return;
+				}
+				var argHeader = new Buffer(5);
+				argHeader.writeUInt8(dataType, 0);
+				argHeader.writeUInt32LE(tempBuf.length, 1);
+				bufArray.push(argHeader);
+				bufArray.push(tempBuf);
+				
+				payloadLength += argHeader.length + tempBuf.length;
+			}
+			else {
+				error(new Error('Unsupported data type argument passed to remote function'));
+				return;
+			}
+		}
+		
+		bufArray[1].writeUInt32LE(payloadLength);
+		
+		return Buffer.concat(bufArray);
+	},
+	
+	parseWebSocketFrame: function(buffer) {
+		var readPosition = 0;
+		var frameBuffer = buffer.readUInt8(readPosition++);
+		
+		var frameObject = {
+			final: frameBuffer & 0x80,
+			opcode: frameBuffer & 0x0F,
+		}
+		
+		frameBuffer = buffer.readUInt8(readPosition++);
+		if(frameBuffer & 0x80) { // Masked?
+			var payloadLength = frameBuffer & 0x7F;
+			if(payloadLength == 126) {
+				payloadLength = buffer.readUInt16BE(readPosition);
+				readPosition += 2;
+			}
+			else if(payloadLength == 127) {
+				payloadLength = buffer.readUInt32BE(readPosition); // Caps out at 32 bits, but the specs say 64. Payload length max is ~4GB
+				readPosition += 8;
+			}
+			
+			frameObject.payloadLength = payloadLength;
+			
+			var mask = [];
+			for(var i = 0; i < 4; i++) {
+				mask[i] = buffer.readUInt8(readPosition++);
+			}
+			
+			var payload = buffer.slice(readPosition, readPosition + payloadLength);
+			frameObject.payload = new Buffer(payloadLength);
+			for(var i = 0; i < payload.length; i++) {
+				frameObject.payload[i] = payload[i] ^ mask[i % 4];
+			}
+			
+			return frameObject;
+		}
+	},
+	
+	makeWebSocketFrameObject: function(buffer) {
+		return {
+			final: true,
+			opcode: 0x1,
+			payloadLength: buffer.length,
+			payload: buffer
+		};
+	},
+	makeWebSocketFrame: function(frameObject) {
+		var bufArray = [];
+		
+		var tempBuf = new Buffer(1);
+		tempBuf.writeUInt8((frameObject.final ? 0x80 : 0x0) | (frameObject.opcode & 0xF));
+		bufArray.push(tempBuf);
+		
+		var tempBuf = new Buffer(1);
+		if(frameObject.payloadLength >= 125) {
+			if(frameObject.payloadLength > 0xFFFF) {
+				tempBuf.writeUInt16BE(127);
+				bufArray.push(tempBuf);
+				
+				tempBuf = new Buffer(8);
+				tempBuf.writeUInt32BE(frameObject.payloadLength);
+			}
+			else {
+				tempBuf.writeUInt16BE(126);
+				bufArray.push(tempBuf);
+				
+				tempBuf = new Buffer(2);
+				tempBuf.writeUInt16BE(frameObject.payloadLength);
+			}
+		}
+		else {
+			tempBuf.writeUInt8(frameObject.payloadLength);
+		}
+		bufArray.push(tempBuf);
+		bufArray.push(frameObject.payload);
+		
+		return Buffer.concat(bufArray);
+	}
+};
+}).call(this,require("buffer").Buffer)
+},{"buffer":5}],4:[function(require,module,exports){
+
+},{}],5:[function(require,module,exports){
 /*!
  * The buffer module from node.js, for the browser.
  *
@@ -1535,7 +2430,7 @@ function blitBuffer (src, dst, offset, length) {
   return i
 }
 
-},{"base64-js":3,"ieee754":4,"is-array":5}],3:[function(require,module,exports){
+},{"base64-js":6,"ieee754":7,"is-array":8}],6:[function(require,module,exports){
 var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
 ;(function (exports) {
@@ -1661,7 +2556,7 @@ var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 	exports.fromByteArray = uint8ToBase64
 }(typeof exports === 'undefined' ? (this.base64js = {}) : exports))
 
-},{}],4:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = nBytes * 8 - mLen - 1
@@ -1747,7 +2642,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],5:[function(require,module,exports){
+},{}],8:[function(require,module,exports){
 
 /**
  * isArray
@@ -1782,7 +2677,7 @@ module.exports = isArray || function (val) {
   return !! val && '[object Array]' == str.call(val);
 };
 
-},{}],6:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -2085,7 +2980,7 @@ function isUndefined(arg) {
   return arg === void 0;
 }
 
-},{}],7:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -2110,7 +3005,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],8:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 // shim for using process in browser
 
 var process = module.exports = {};
@@ -2202,14 +3097,14 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],9:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 module.exports = function isBuffer(arg) {
   return arg && typeof arg === 'object'
     && typeof arg.copy === 'function'
     && typeof arg.fill === 'function'
     && typeof arg.readUInt8 === 'function';
 }
-},{}],10:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -2799,856 +3694,4 @@ function hasOwnProperty(obj, prop) {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":9,"_process":8,"inherits":7}],11:[function(require,module,exports){
-(function (global,Buffer){
-var NodeSocketClient = require('../node_modules/nodesocket/lib/client.js'),
-	NodeSocketCommon = require('../node_modules/nodesocket/lib/common.js'),
-	util = require('util');
-
-NodeSocketClient.prototype._write = function(buffer) {
-	this._socket.send(buffer);
-};
-
-NodeSocketClient.prototype._nodeServerVerified = function() { };
-
-NodeSocketClient.prototype._nodeConnected = function(socket) {
-	this._state = NodeSocketCommon.EnumConnectionState.Connected;
-	this.emit('connect', socket);
-	
-	var self = this;
-	
-	socket.onmessage = function(event) {
-		self._nodeDataReceived.call(self, new Buffer(event.data));
-	};
-	
-	socket.onclose = function(event) {
-		self._nodeClosed.call(self, socket, !event.wasClean);
-	};
-	
-	socket.onerror = function(event) {
-		self._nodeSocketError.call(self, socket, event);
-	};
-	
-	this._write(NodeSocketCommon.nodesocketSignature);
-};
-
-NodeSocketClient.prototype.connect = function() {
-	var socket = new WebSocket('ws' + (this._options.secure ? 's' : '') + '://' + this._ipaddress + ':' + this._port, 'nodesocket');
-	
-	var self = this;
-	socket.onopen = function() {
-		self._nodeConnected.call(self, socket);
-	};
-	
-	this._socket = socket;
-};
-
-NodeSocketClient.prototype.close = function() {
-	if(this._socket) {
-		this._socket.close();
-	}
-	else {
-		this.emit('error', new Error('Unable to stop client, no client instance available'));
-		return false;
-	}
-	
-	return true;
-};
-
-function NodeSocket(options) {
-	this._options = options || { };
-}
-
-NodeSocket.prototype.createClient = function(port, ipaddress) {
-	return new NodeSocketClient(port, ipaddress, this._options);
-};
-
-global.nodesocket = module.exports = function(options) {
-	return new NodeSocket(options);
-};
-}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"../node_modules/nodesocket/lib/client.js":12,"../node_modules/nodesocket/lib/common.js":13,"buffer":2,"util":10}],12:[function(require,module,exports){
-(function (Buffer){
-var net = require('net'),
-	tls = require('tls'),
-	NodeSocketCommon = require('./common.js'),
-	EventEmitter = require('events'),
-	util = require('util');
-
-function NodeSocketClient(port, ipaddress, options) {
-	EventEmitter.call(this);
-	
-	this._options = options || { };
-	this._port = port;
-	this._ipaddress = ipaddress;
-	this._socket = undefined;
-	this._functions = { };
-	this._state = NodeSocketCommon.EnumConnectionState.Disconnected;
-	this._master = false;
-	
-	this._secure = this._options.secure;
-	this._interface = this._secure ? tls : net;
-	
-	this._processCallback = undefined;
-	this._processQueue = [];
-}
-util.inherits(NodeSocketClient, EventEmitter);
-
-NodeSocketClient.prototype._write = function(buffer) {
-	if(this._options.webSocket) {
-		this._socket.write(NodeSocketCommon.makeWebSocketFrame(NodeSocketCommon.makeWebSocketFrameObject(buffer)));
-	}
-	else {
-		this._socket.write(buffer);
-	}
-};
-
-NodeSocketClient.prototype.remoteExecute = function(identifier, typemap, args, callback) {
-	if(this._options.bidirectional) {
-		this.requestMaster();
-	}
-	
-	if(this._master) {
-		if(this._state === NodeSocketCommon.EnumConnectionState.Verified) {
-			var self = this;
-			var buffer = NodeSocketCommon.createExecutePayload(identifier, typemap, args, function(error) {
-				self.emit('error', error, self._socket);
-			});
-			
-			if(!buffer) {
-				return false;
-			}
-			this._processCallback = callback;
-			this._state = NodeSocketCommon.EnumConnectionState.Processing;
-			
-			this._write(buffer);
-		}
-		else if(this._state === NodeSocketCommon.EnumConnectionState.Processing || this._state === NodeSocketCommon.EnumConnectionState.PostProcessing) {
-			this._processQueue.push(new NodeSocketCommon.ProcessQueue(this, this.remoteExecute, arguments));
-		}
-		else {
-			this.emit('error', new Error('Unable to execute remote function on an unverified/disconnected node'), this._socket);
-			return false;
-		}
-	}
-	else {
-		this.emit('error', new Error('Unable to execute remote function when acting as a slave'), this._socket);
-		return false;
-	}
-	
-	return true;
-};
-
-NodeSocketClient.prototype.defineFunction = function(identifier, callback, responseType) {
-	this._functions[identifier] = NodeSocketCommon.makePayloadFunctionStore(callback, responseType);
-};
-
-NodeSocketClient.prototype.linkFunction = function(identifier, typemap) {
-	var self = this;
-	return function(callback) {
-		if(!typemap) {
-			typemap = { };
-		}
-		
-		return self.remoteExecute.call(self, identifier, typemap, Array.prototype.slice.call(arguments, 1), callback);
-	};
-};
-
-NodeSocketClient.prototype.requestMaster = function() {
-	if(!this._master) {
-		if(this._state === NodeSocketCommon.EnumConnectionState.Verified) {
-			this._write(new Buffer([ NodeSocketCommon.EnumExecutionCode.RequestMaster ]));
-			this._master = true;
-			
-			this.emit('master', this._socket);
-		}
-		else {
-			this.emit('error', new Error('A master request must be done over an idle connection'), this._socket);
-			return false;
-		}
-	}
-	
-	return true;
-};
-
-NodeSocketClient.prototype.requestSlave = function() {
-	if(this._master) {
-		if(!this._options.denyMasterRequests) {
-			if(this._state === NodeSocketCommon.EnumConnectionState.Verified || this._state === NodeSocketCommon.EnumConnectionState.PostProcessing) {
-				this._write(new Buffer([ NodeSocketCommon.EnumExecutionCode.RequestSlave ]));
-			}
-			else {
-				this.emit('error', new Error('A slave request must be done over an idle connection'), this._socket);
-				return false;
-			}
-		}
-		else {
-			self.emit('error', new Error('Unable to request as a slave when the current connection denies a remote master'), this._socket);
-			return false;
-		}
-	}
-	
-	return true;
-};
-
-NodeSocketClient.prototype._nodeServerVerified = function() {
-	// Perform any socket configuration
-	this._socket.setKeepAlive(this._options.keepAlive, this._options.keepAliveDelay);
-};
-
-NodeSocketClient.prototype._nodeDataReceived = function(buffer) {
-	this.emit('data', this._socket, buffer);
-	
-	var bufferPosition = buffer.length; // Prevent infinite loops
-
-	if(this._state === NodeSocketCommon.EnumConnectionState.Connected) {
-		if(NodeSocketCommon.nodesocketSignature.equals(buffer)) {
-			this._state = NodeSocketCommon.EnumConnectionState.Verified;
-			bufferPosition = NodeSocketCommon.nodesocketSignature.length;
-			
-			this._nodeServerVerified();
-			this.requestMaster();
-			
-			this.emit('verified', this._socket);
-		}
-	}
-	else if(this._state === NodeSocketCommon.EnumConnectionState.Verified) {
-		var execCode = buffer.readUInt8(0);
-		
-		if(this._master) {
-			if(execCode === NodeSocketCommon.EnumExecutionCode.RequestMaster) {
-				bufferPosition = 1;
-				this._master = this._options.denyMasterRequests;
-				
-				if(!this._master) {
-					this.emit('slave', this._socket);
-				}
-			}
-			else if(execCode === NodeSocketCommon.EnumExecutionCode.RequestSlave) {
-				bufferPosition = 1;
-			}
-			else {
-				this._write(new Buffer([ NodeSocketCommon.EnumNodeResponse.NotAllowed ]));
-			}
-		}
-		else {
-			if(execCode === NodeSocketCommon.EnumExecutionCode.ExecFunction) {
-				var self = this;
-				
-				var writeBuffer = NodeSocketCommon.parseExecutePayload.call(this, this._functions, buffer.slice(1), function(error) {
-					self.emit('error', error, this._socket);
-				});
-				
-				bufferPosition = 1 + writeBuffer.position;
-				
-				this._write(writeBuffer.value);
-			}
-			else if(execCode === NodeSocketCommon.EnumExecutionCode.RequestSlave) {
-				this.requestMaster();
-				bufferPosition = 1;
-			}
-			else if(execCode === NodeSocketCommon.EnumExecutionCode.RequestMaster) {
-				bufferPosition = 1;
-			}
-			else {
-				this._write(new Buffer([ NodeSocketCommon.EnumNodeResponse.InvalidExecCode ]));
-			}
-		}
-	}
-	else if(this._state === NodeSocketCommon.EnumConnectionState.Processing) {
-		this._state = NodeSocketCommon.EnumConnectionState.PostProcessing;
-		
-		var nodeResponse = buffer.readUInt8(0);
-
-		if(nodeResponse === NodeSocketCommon.EnumNodeResponse.Okay) { // No error reported by node
-			var resultBuffer = NodeSocketCommon.parseResultPayload(buffer.slice(1));
-			bufferPosition = 1 + resultBuffer.position;
-			this._processCallback(resultBuffer.value);
-		}
-		else if(nodeResponse === NodeSocketCommon.EnumNodeResponse.NoResult) {
-			bufferPosition = 1;
-			
-			if(this._processCallback) {
-				this._processCallback();
-			}
-		}
-		else if(nodeResponse in NodeSocketCommon.EnumNodeResponseErrorString) {
-			this.emit('error', new Error(NodeSocketCommon.EnumNodeResponseErrorString[nodeResponse]), this._socket);
-		}
-		else {
-			this.emit('error', new Error('Unknown response received from the connected node'), this._socket);
-		}
-		
-		this._processCallback = undefined;
-		
-		this._state = NodeSocketCommon.EnumConnectionState.Verified;
-		
-		if(this._processQueue.length > 0) {
-			this._processQueue.splice(0, 1)[0].execute();
-		}
-	}
-	
-	if(bufferPosition < buffer.length) {
-		this._nodeDataReceived(buffer.slice(bufferPosition));
-	}
-	
-	return bufferPosition; // This is for the NodeSocketServer class
-};
-
-NodeSocketClient.prototype._nodeSocketError = function(socket, error) {
-	this.emit('error', error, socket);
-};
-
-NodeSocketClient.prototype._nodeDisconnected = function(socket) {
-	this._state = NodeSocketCommon.EnumConnectionState.Disconnected;
-	this.emit('disconnect', socket);
-};
-
-NodeSocketClient.prototype._nodeTimeout = function(socket) {
-	this.emit('timeout', socket);
-	socket.end();
-};
-
-NodeSocketClient.prototype._nodeClosed = function(socket, had_error) {
-	this.emit('close', socket, had_error);
-};
-
-NodeSocketClient.prototype._nodeOCSPResponse = function(socket, response) {
-	this.emit('OCSPResponse', socket, response);
-};
-
-NodeSocketClient.prototype._nodeConnected = function(socket) {
-	this._state = NodeSocketCommon.EnumConnectionState.Connected;
-	this.emit('connect', socket);
-	
-	var self = this;
-	socket.on('data', function(buffer) {
-		self._nodeDataReceived.call(self, buffer);
-	});
-
-	socket.on('end', function() {
-		self._nodeDisconnected.call(self, socket);
-	});
-	
-	socket.on('timeout', function() {
-		self._nodeTimeout.call(self, socket);
-	});
-	
-	socket.on('close', function(had_error) {
-		self._nodeClosed.call(self, socket, had_error);
-	});
-	
-	if(this._secure) {
-		socket.on('OCSPResponse', function(response) {
-			self._nodeOCSPResponse.call(self, socket, response);
-		});
-	}
-	
-	this._write(NodeSocketCommon.nodesocketSignature);
-};
-
-NodeSocketClient.prototype.connect = function() {
-	var args = [ this._port, this._ipaddress];
-	
-	if(this._secure) {
-		args.push(this._options);
-	}
-	
-	var self = this;
-	args.push(function() {
-		self._nodeConnected.call(self, self._socket);
-	});
-	
-	this._socket = this._interface.connect.apply(this, args);
-
-	this._socket.on('error', function(error) {
-		self._nodeSocketError.call(self, self._socket, error);
-	});
-};
-
-NodeSocketClient.prototype.close = function() {
-	if(this._socket) {
-		this._socket.end();
-	}
-	else {
-		this.emit('error', new Error('Unable to stop client, no client instance available'));
-		return false;
-	}
-	
-	return true;
-};
-
-module.exports = NodeSocketClient;
-}).call(this,require("buffer").Buffer)
-},{"./common.js":13,"buffer":2,"events":6,"net":1,"tls":1,"util":10}],13:[function(require,module,exports){
-(function (Buffer){
-
-function ProcessQueue(thisArg, method, args) { // Used to store function calls and their arguments to execute at a later time
-	this._thisArg = thisArg;
-	this._method = method;
-	this._args = args;
-}
-
-ProcessQueue.prototype.execute = function() {
-	this._method.apply(this._thisArg, this._args);
-};
-
-function makeBufferPosResponse(value, position) {
-	return {
-		value: value,
-		position: position
-	};
-}
-
-module.exports = {
-	nodesocketSignature: new Buffer('nsockv01', module.exports.encoding),
-	encoding: 'utf-8',
-	
-	EnumConnectionState: {
-		Disconnected:		0x0,
-		Connected:			0x1,
-		Verified:			0x2,
-		Processing:			0x3,
-		WebSocketConnected:	0x4,
-		PostProcessing:		0x5,
-		_max:				0x6
-	},
-	EnumExecutionCode: {
-		RequestMaster:	0x0,
-		RequestSlave:	0x1,
-		ExecFunction:	0x2,
-		_max: 			0x3
-	},
-	EnumDataType: {
-		'byte':		0x0,
-		'ubyte':	0x1,
-		'short':	0x2,
-		'ushort':	0x3,
-		'int':		0x4,
-		'uint':		0x5,
-		'float':	0x6,
-		'double':	0x7,
-		'string':	0x8,
-		'boolean':	0x9,
-		_max: 		0xA
-	},
-	EnumNodeResponse: {
-		Okay:				0x0,
-		NoResult:			0x1, // Still 'ok', just don't read the result stream, there's nothing there
-		InvalidFunction:	0x2,
-		NodeError:			0x3,
-		InvalidExecCode:	0x4,
-		NotAllowed:			0x5,
-		_max: 				0x6
-	},
-	EnumNodeResponseErrorString: {
-		0x0: 'Okay',
-		0x1: 'Okay (No result)',
-		0x2: 'An invalid function was specified',
-		0x3: 'Node reported an internal error',
-		0x4: 'An invalid execution code was specified',
-		0x5: 'Remote functions are not allowed from this node, remote is the current master',
-	},
-	
-	ProcessQueue: ProcessQueue,
-	
-	makePayloadFunctionStore: function(callback, responseType) {
-		return {
-			callback: callback,
-			responseType: responseType
-		};
-	},
-	
-	// Function to process and execute a payload buffer and return the response buffer
-	parseExecutePayload: function(functions, payload, error) {
-		var payloadLength = payload.readUInt32LE(0);
-		var identifierEndPosition = 8 + payload.readUInt32LE(4);
-		var identifier = payload.slice(8, identifierEndPosition).toString(module.exports.encoding);
-		
-		var position = identifierEndPosition;
-		
-		var response = [ new Buffer(1) /* Status code response */ ];
-		if(identifier in functions) {
-			var args = [];
-			for(; position < payloadLength;) {
-				var dataType = payload.readUInt8(position++);
-				var dataSize = payload.readUInt32LE(position);
-				position += 4;
-				var value = undefined;
-				switch(dataType) {
-					case module.exports.EnumDataType.byte:
-						value = payload.readInt8(position);
-						position++;
-						break;
-					case module.exports.EnumDataType.ubyte:
-						value = payload.readUInt8(position);
-						position++;
-						break;
-					case module.exports.EnumDataType.short:
-						value = payload.readInt16LE(position);
-						position += 2;
-						break;
-					case module.exports.EnumDataType.ushort:
-						value = payload.readUInt16LE(position);
-						position += 2;
-						break;
-					case module.exports.EnumDataType.int:
-						value = payload.readInt32LE(position);
-						position += 4;
-						break;
-					case module.exports.EnumDataType.uint:
-						value = payload.readUInt32LE(position);
-						position += 4;
-						break;
-					case module.exports.EnumDataType.float:
-						value = payload.readFloatLE(position);
-						position += 4;
-						break;
-					case module.exports.EnumDataType.double:
-						value = payload.readDoubleLE(position);
-						position += 8;
-						break;
-					case module.exports.EnumDataType.string:
-						var next = position + dataSize;
-						value = payload.slice(position, next).toString(module.exports.encoding);
-						position = next;
-						break;
-					case module.exports.EnumDataType.boolean:
-						value = payload.readUInt8(position) > 0;
-						position++;
-						break;
-					default:
-						error(new Error('Unsupported data type argument received from client'));
-						response[0].writeUInt8(module.exports.EnumNodeResponse.NodeError, 0);
-						return response[0]; // Early exit
-				}
-				
-				args.push(value);
-			}
-	
-			var result = functions[identifier].callback.apply(this, args);
-			if(result === undefined || result === null) {
-				response[0].writeUInt8(module.exports.EnumNodeResponse.NoResult, 0);
-			}
-			else {
-				response[0].writeUInt8(module.exports.EnumNodeResponse.Okay, 0);
-				
-				var argtype = functions[identifier].responseType;
-				
-				if(!argtype) {
-					switch(typeof result) {
-						case 'number':
-							if(result === (result|0)) {
-								argtype = 'int'; // Default to int for normal numbers
-							}
-							else {
-								argtype = 'float'; // float for anything else
-							}
-							break;
-						case 'string':
-							argtype = 'string';
-							break;
-						case 'boolean':
-							argtype = 'boolean';
-							break;
-					}
-					functions[identifier].responseType = argtype;
-				}
-				
-				var tempBuf = undefined;
-				var dataType = module.exports.EnumDataType[argtype];
-				if(dataType !== undefined) {
-					switch(dataType) {
-						case module.exports.EnumDataType.byte:
-							tempBuf = new Buffer(1);
-							tempBuf.writeInt8(result, 0);
-							break;
-						case module.exports.EnumDataType.ubyte:
-							tempBuf = new Buffer(1);
-							tempBuf.writeUInt8(result, 0);
-							break;
-						case module.exports.EnumDataType.short:
-							tempBuf = new Buffer(2);
-							tempBuf.writeInt16LE(result, 0);
-							break;
-						case module.exports.EnumDataType.ushort:
-							tempBuf = new Buffer(2);
-							tempBuf.writeUInt16LE(result, 0);
-							break;
-						case module.exports.EnumDataType.int:
-							tempBuf = new Buffer(4);
-							tempBuf.writeInt32LE(result, 0);
-							break;
-						case module.exports.EnumDataType.uint:
-							tempBuf = new Buffer(4);
-							tempBuf.writeUInt32LE(result, 0);
-							break;
-						case module.exports.EnumDataType.float:
-							tempBuf = new Buffer(4);
-							tempBuf.writeFloatLE(result, 0);
-							break;
-						case module.exports.EnumDataType.double:
-							tempBuf = new Buffer(8);
-							tempBuf.writeDoubleLE(result, 0);
-							break;
-						case module.exports.EnumDataType.string:
-							tempBuf = new Buffer(result);
-							break;
-						case module.exports.EnumDataType.boolean:
-							tempBuf = new Buffer(1);
-							tempBuf.writeUInt8(result ? 0x1 : 0x0, 0);
-							break;
-						default:
-							error(new Error('Data type' + dataType + ' has gone unhandled by this node implementation'));
-							response[0].writeUInt8(module.exports.EnumNodeResponse.NodeError, 0);
-							break;
-					}
-					
-					if(dataType < module.exports.EnumDataType._max) {
-						var argHeader = new Buffer(5);
-						argHeader.writeUInt8(dataType, 0);
-						argHeader.writeUInt32LE(tempBuf.length, 1);
-						response.push(argHeader);
-						response.push(tempBuf);
-					}
-				}
-				else {
-					error(new Error('Unsupported data type returned from nodesocket function'));
-					response[0].writeUInt8(module.exports.EnumNodeResponse.NodeError, 0);
-				}
-			}
-		}
-		else {
-			response[0].writeUInt8(module.exports.EnumNodeResponse.InvalidFunction, 0);
-		}
-	
-		return makeBufferPosResponse(Buffer.concat(response), position);
-	},
-	
-	parseResultPayload: function(buffer) {
-		var dataType = buffer.readUInt8(0);
-		var dataSize = buffer.readUInt32LE(1);
-		var result = undefined;
-		
-		switch(dataType) {
-			case module.exports.EnumDataType.byte:
-				result = buffer.readInt8(5);
-				break;
-			case module.exports.EnumDataType.ubyte:
-				result = buffer.readUInt8(5);
-				break;
-			case module.exports.EnumDataType.short:
-				result = buffer.readInt16LE(5);
-				break;
-			case module.exports.EnumDataType.ushort:
-				result = buffer.readUInt16LE(5);
-				break;
-			case module.exports.EnumDataType.int:
-				result = buffer.readInt32LE(5);
-				break;
-			case module.exports.EnumDataType.uint:
-				result = buffer.readUInt32LE(5);
-				break;
-			case module.exports.EnumDataType.float:
-				result = buffer.readFloatLE(5);
-				break;
-			case module.exports.EnumDataType.double:
-				result = buffer.readDoubleLE(5);
-				break;
-			case module.exports.EnumDataType.string:
-				result = buffer.slice(5, dataSize + 5).toString(module.exports.encoding);
-				break;
-			case module.exports.EnumDataType.ubyte:
-				result = buffer.readUInt8(1) > 0;
-				break;
-			default:
-				this.emit('error', new Error('Unrecognized data type ' + dataType + ' returned from node'), this._socket);
-				return; // Stop processing here
-		}
-		
-		return makeBufferPosResponse(result, 5 + dataSize);
-	},
-	
-	// Creates a remote function payload and sends it
-	createExecutePayload: function(identifier, typemap, args, error) {
-		var bufArray = [ new Buffer([ module.exports.EnumExecutionCode.ExecFunction ]) ];
-		bufArray.push(new Buffer(4)); // [1] = reserverd for total payload size, minus the execution code
-		
-		var buf = new Buffer(4);
-		buf.writeUInt32LE(identifier.length);
-		bufArray.push(buf);
-		
-		var tempBuf = new Buffer(identifier);
-		bufArray.push(tempBuf);
-		
-		var payloadLength = 4 + identifier.length;
-		for(var i = 0; i < args.length; i++) {
-			var iStr = i.toString();
-			var argtype = typemap[iStr];
-			
-			if(!argtype) {
-				switch(typeof args[i]) {
-					case 'number':
-						if(args[i] === (args[i]|0)) {
-							argtype = 'int'; // Default to int for normal numbers
-						}
-						else {
-							argtype = 'float'; // float for anything else
-						}
-						break;
-					case 'string':
-						argtype = 'string';
-						break;
-					case 'boolean':
-						argtype = 'boolean';
-						break;
-				}
-				typemap[iStr] = argtype;
-			}
-			
-			var dataType = module.exports.EnumDataType[argtype];
-			if(dataType !== undefined) {
-				switch(dataType) {
-					case module.exports.EnumDataType.byte:
-						tempBuf = new Buffer(1);
-						tempBuf.writeInt8(args[i], 0);
-						break;
-					case module.exports.EnumDataType.ubyte:
-						tempBuf = new Buffer(1);
-						tempBuf.writeUInt8(args[i], 0);
-						break;
-					case module.exports.EnumDataType.short:
-						tempBuf = new Buffer(2);
-						tempBuf.writeInt16LE(args[i], 0);
-						break;
-					case module.exports.EnumDataType.ushort:
-						tempBuf = new Buffer(2);
-						tempBuf.writeUInt16LE(args[i], 0);
-						break;
-					case module.exports.EnumDataType.int:
-						tempBuf = new Buffer(4);
-						tempBuf.writeInt32LE(args[i], 0);
-						break;
-					case module.exports.EnumDataType.uint:
-						tempBuf = new Buffer(4);
-						tempBuf.writeUInt32LE(args[i], 0);
-						break;
-					case module.exports.EnumDataType.float:
-						tempBuf = new Buffer(4);
-						tempBuf.writeFloatLE(args[i], 0);
-						break;
-					case module.exports.EnumDataType.double:
-						tempBuf = new Buffer(8);
-						tempBuf.writeDoubleLE(args[i], 0);
-						break;
-					case module.exports.EnumDataType.string:
-						tempBuf = new Buffer(args[i]);
-						break;
-					case module.exports.EnumDataType.boolean:
-						tempBuf = new Buffer(1);
-						tempBuf.writeUInt8(args[i] ? 0x1 : 0x0, 0);
-						break;
-					default:
-						error(new Error('Data type' + dataType + ' has gone unhandled by client'));
-						return;
-				}
-				var argHeader = new Buffer(5);
-				argHeader.writeUInt8(dataType, 0);
-				argHeader.writeUInt32LE(tempBuf.length, 1);
-				bufArray.push(argHeader);
-				bufArray.push(tempBuf);
-				
-				payloadLength += argHeader.length + tempBuf.length;
-			}
-			else {
-				error(new Error('Unsupported data type argument passed to remote function'));
-				return;
-			}
-		}
-		
-		bufArray[1].writeUInt32LE(payloadLength);
-		
-		return Buffer.concat(bufArray);
-	},
-	
-	parseWebSocketFrame: function(buffer) {
-		var readPosition = 0;
-		var frameBuffer = buffer.readUInt8(readPosition++);
-		
-		var frameObject = {
-			final: frameBuffer & 0x80,
-			opcode: frameBuffer & 0x0F,
-		}
-		
-		frameBuffer = buffer.readUInt8(readPosition++);
-		if(frameBuffer & 0x80) { // Masked?
-			var payloadLength = frameBuffer & 0x7F;
-			if(payloadLength == 126) {
-				payloadLength = buffer.readUInt16BE(readPosition);
-				readPosition += 2;
-			}
-			else if(payloadLength == 127) {
-				payloadLength = buffer.readUInt32BE(readPosition); // Caps out at 32 bits, but the specs say 64. Payload length max is ~4GB
-				readPosition += 8;
-			}
-			
-			frameObject.payloadLength = payloadLength;
-			
-			var mask = [];
-			for(var i = 0; i < 4; i++) {
-				mask[i] = buffer.readUInt8(readPosition++);
-			}
-			
-			var payload = buffer.slice(readPosition, readPosition + payloadLength);
-			frameObject.payload = new Buffer(payloadLength);
-			for(var i = 0; i < payload.length; i++) {
-				frameObject.payload[i] = payload[i] ^ mask[i % 4];
-			}
-			
-			return frameObject;
-		}
-	},
-	
-	makeWebSocketFrameObject: function(buffer) {
-		return {
-			final: true,
-			opcode: 0x1,
-			payloadLength: buffer.length,
-			payload: buffer
-		};
-	},
-	makeWebSocketFrame: function(frameObject) {
-		var bufArray = [];
-		
-		var tempBuf = new Buffer(1);
-		tempBuf.writeUInt8((frameObject.final ? 0x80 : 0x0) | (frameObject.opcode & 0xF));
-		bufArray.push(tempBuf);
-		
-		var tempBuf = new Buffer(1);
-		if(frameObject.payloadLength >= 125) {
-			if(frameObject.payloadLength > 0xFFFF) {
-				tempBuf.writeUInt16BE(127);
-				bufArray.push(tempBuf);
-				
-				tempBuf = new Buffer(8);
-				tempBuf.writeUInt32BE(frameObject.payloadLength);
-			}
-			else {
-				tempBuf.writeUInt16BE(126);
-				bufArray.push(tempBuf);
-				
-				tempBuf = new Buffer(2);
-				tempBuf.writeUInt16BE(frameObject.payloadLength);
-			}
-		}
-		else {
-			tempBuf.writeUInt8(frameObject.payloadLength);
-		}
-		bufArray.push(tempBuf);
-		bufArray.push(frameObject.payload);
-		
-		return Buffer.concat(bufArray);
-	}
-};
-}).call(this,require("buffer").Buffer)
-},{"buffer":2}]},{},[11]);
+},{"./support/isBuffer":12,"_process":11,"inherits":10}]},{},[1]);

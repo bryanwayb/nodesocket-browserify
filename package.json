@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "buffer": "^3.2.2",
-    "nodesocket": "^0.1.4"
+    "nodesocket": "https://github.com/bryanwayb/nodesocket-nodejs.git"
   },
   "keywords": [
     "nodesocket",
